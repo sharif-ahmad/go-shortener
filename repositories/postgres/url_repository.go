@@ -2,7 +2,12 @@ package postgres
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/rs/zerolog"
+	sqldblogger "github.com/simukti/sqldb-logger"
+	"github.com/simukti/sqldb-logger/logadapter/zerologadapter"
+	"os"
 	"strings"
 	"time"
 
@@ -27,7 +32,7 @@ func NewPostgresURLRepository(connStr string) (*PostgresURLRepository, error) {
 		return nil, err
 	}
 
-	//db = sqldblogger.OpenDriver(connStr, db.Driver(), zerologadapter.New(zerolog.New(os.Stdout)))
+	db = sqldblogger.OpenDriver(connStr, db.Driver(), zerologadapter.New(zerolog.New(os.Stdout)))
 
 	err = db.Ping()
 	if err != nil {
@@ -38,7 +43,7 @@ func NewPostgresURLRepository(connStr string) (*PostgresURLRepository, error) {
 }
 
 func (r *PostgresURLRepository) FindAll(filters map[string]any) ([]*models.URL, error) {
-	where, values := r.whereClause(filters)
+	where, values := r.whereClause(0, filters)
 	queryStr := `SELECT * FROM ` + r.tableName + " " + where
 
 	rows, err := r.db.Query(queryStr, values...)
@@ -74,13 +79,16 @@ func (r *PostgresURLRepository) Find(id int) (*models.URL, error) {
 }
 
 func (r *PostgresURLRepository) FindBy(params map[string]any) (*models.URL, error) {
-	where, values := r.whereClause(params)
+	where, values := r.whereClause(0, params)
 	queryStr := `SELECT * FROM ` + r.tableName + " " + where
 
 	var url models.URL
 	row := r.db.QueryRow(queryStr, values...)
 
 	if err := row.Scan(&url.ID, &url.Original, &url.ShortCode, &url.CreatedAt, &url.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil // not found
+		}
 		return nil, repoerr.InternalError{Msg: fmt.Sprintf("FindBy: %v", err)}
 	}
 
@@ -92,7 +100,7 @@ func (r *PostgresURLRepository) Create(url *models.URL) (*models.URL, error) {
 	url.CreatedAt, url.UpdatedAt = now, now
 
 	queryStr := `INSERT INTO ` + r.tableName +
-		`(original, short_code, created_at, updated_at) VALUES(?, ?, ?, ?) RETURNING id`
+		`(original, short_code, created_at, updated_at) VALUES($1, $2, $3, $4) RETURNING id`
 	row := r.db.QueryRow(queryStr, url.Original, url.ShortCode, url.CreatedAt, url.UpdatedAt)
 	err := row.Scan(&url.ID)
 	if err != nil {
@@ -119,8 +127,8 @@ func (r *PostgresURLRepository) Update(id int, fields map[string]any) (*models.U
 
 func (r *PostgresURLRepository) UpdateBy(fields map[string]any, filters map[string]any) (*models.URL, error) {
 
-	setClause, setValues := r.setClause(fields)
-	whereClause, whereValues := r.whereClause(filters)
+	setClause, setValues := r.setClause(0, fields)
+	whereClause, whereValues := r.whereClause(len(setValues), filters)
 
 	queryStr := `UPDATE ` + r.tableName + " " + setClause + " " + whereClause + `RETURNING *`
 
@@ -135,7 +143,7 @@ func (r *PostgresURLRepository) UpdateBy(fields map[string]any, filters map[stri
 	return &url, nil
 }
 
-func (r *PostgresURLRepository) clause(clauseName string, params map[string]any) (string, []any) {
+func (r *PostgresURLRepository) clause(clauseName string, counter int, params map[string]any) (string, []any) {
 	if len(params) == 0 {
 		return "", []any{}
 	}
@@ -145,9 +153,10 @@ func (r *PostgresURLRepository) clause(clauseName string, params map[string]any)
 
 	clause.WriteString(clauseName)
 	for k, v := range params {
+		counter++
 		clause.WriteString(" ")
 		clause.WriteString(k)
-		clause.WriteString(" = ?")
+		clause.WriteString(fmt.Sprintf(" = $%d", counter))
 
 		values = append(values, v)
 	}
@@ -155,10 +164,10 @@ func (r *PostgresURLRepository) clause(clauseName string, params map[string]any)
 	return clause.String(), values
 }
 
-func (r *PostgresURLRepository) setClause(params map[string]any) (string, []any) {
-	return r.clause("SET", params)
+func (r *PostgresURLRepository) setClause(counter int, params map[string]any) (string, []any) {
+	return r.clause("SET", counter, params)
 }
 
-func (r *PostgresURLRepository) whereClause(params map[string]any) (string, []any) {
-	return r.clause("WHERE", params)
+func (r *PostgresURLRepository) whereClause(counter int, params map[string]any) (string, []any) {
+	return r.clause("WHERE", counter, params)
 }
